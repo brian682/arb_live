@@ -1,0 +1,12 @@
+{
+  "name": "live-arb-bot",
+  "version": "1.0.0",
+  "description": "Live in-play arb scanner — SportyBet, Betika, 22Bet, Odibets (Kenya)",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "axios": "^1.6.0"
+  }
+}
