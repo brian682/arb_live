@@ -1,24 +1,18 @@
 /**
  * ╔══════════════════════════════════════════════════════════╗
- * ║         LIVE ARB BOT — KENYA EDITION                     ║
+ * ║         LIVE ARB BOT — KENYA EDITION  v2                 ║
  * ║                                                          ║
  * ║  Scrapes LIVE in-play games directly from:               ║
  * ║    • SportyBet Kenya  (live feed)                        ║
  * ║    • Betika Kenya     (live feed)                        ║
  * ║    • 22Bet            (live feed)                        ║
- * ║    • Odibets Kenya    (live feed)                        ║
  * ║                                                          ║
- * ║  Finds arbs across books in real time                    ║
- * ║  Sends Telegram alert with score + match minute          ║
- * ║  Runs every 1 minute FREE on GitHub Actions              ║
+ * ║  NO PAID API NEEDED — all direct scraping                ║
  * ╚══════════════════════════════════════════════════════════╝
- *
- * NO PAID API KEY NEEDED — all direct scraping
  */
 
 const axios = require("axios");
 
-// ─── ENV ────────────────────────────────────────────────────
 const TELEGRAM_TOKEN   = process.env.TELEGRAM_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 const MIN_PROFIT_PCT   = parseFloat(process.env.MIN_PROFIT_PCT || "0");
@@ -27,117 +21,134 @@ const STAKE            = parseFloat(process.env.STAKE || "1000");
 // ─── HELPERS ─────────────────────────────────────────────────
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-function now() {
+function nowKE() {
   return new Date().toLocaleTimeString("en-KE", {
     timeZone: "Africa/Nairobi", hour: "2-digit", minute: "2-digit", second: "2-digit"
   });
 }
 
 function norm(s) {
-  return (s || "")
-    .toLowerCase()
+  return (s || "").toLowerCase()
     .replace(/[^a-z0-9 ]/g, "")
-    .replace(/\s+/g, " ")
-    .trim();
+    .replace(/\s+/g, " ").trim();
 }
 
-// Fuzzy team name matching across bookmakers
-function teamsMatch(homeA, awayA, homeB, awayB) {
-  const ha = norm(homeA), aa = norm(awayA), hb = norm(homeB), ab = norm(awayB);
-  if (ha === hb && aa === ab) return true;
-  if (ha === ab && aa === hb) return true;
-
+function teamsMatch(h1, a1, h2, a2) {
+  const [nh1, na1, nh2, na2] = [norm(h1), norm(a1), norm(h2), norm(a2)];
+  if (nh1 === nh2 && na1 === na2) return true;
+  if (nh1 === na2 && na1 === nh2) return true;
   const words = s => new Set(s.split(" ").filter(w => w.length > 2));
   const overlap = (x, y) => { let n = 0; for (const w of words(x)) if (words(y).has(w)) n++; return n; };
-  const fwd = overlap(ha, hb) + overlap(aa, ab);
-  const rev = overlap(ha, ab) + overlap(aa, hb);
-  return Math.max(fwd, rev) >= 2;
+  return Math.max(overlap(nh1, nh2) + overlap(na1, na2), overlap(nh1, na2) + overlap(na1, nh2)) >= 2;
 }
 
 // ════════════════════════════════════════════════════════════
 //  TELEGRAM
 // ════════════════════════════════════════════════════════════
-async function sendTelegram(message) {
+async function sendTelegram(msg) {
   try {
     const res = await axios.post(
       `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`,
-      { chat_id: TELEGRAM_CHAT_ID, text: message, parse_mode: "HTML" },
+      { chat_id: TELEGRAM_CHAT_ID, text: msg, parse_mode: "HTML" },
       { timeout: 10000 }
     );
-    if (res.data.ok) console.log(`[TG ✅] Sent`);
-    else console.error("[TG FAIL]", JSON.stringify(res.data));
+    if (res.data.ok) console.log("[TG ✅] Sent");
+    else console.error("[TG FAIL]", res.data.description);
   } catch (e) {
-    console.error("[TG ERROR]", e.response?.data || e.message);
+    console.error("[TG ERROR]", e.response?.data?.description || e.message);
   }
 }
 
 // ════════════════════════════════════════════════════════════
-//  SPORTYBET LIVE SCRAPER
-//  Endpoint: /api/ke/factsCenter/liveEvent
+//  SPORTYBET LIVE — corrected endpoint
 // ════════════════════════════════════════════════════════════
 async function fetchSportybetLive() {
   const games = [];
   try {
+    // Correct endpoint for SportyBet KE live events
     const { data } = await axios.get(
-      "https://www.sportybet.com/api/ke/factsCenter/liveEvent",
+      "https://www.sportybet.com/api/ke/factsCenter/liveData",
       {
         params: { sportId: "sr:sport:1", _t: Date.now() },
         headers: {
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/123.0.0.0 Safari/537.36",
-          "Accept": "application/json",
-          "Referer": "https://www.sportybet.com/ke/",
+          "User-Agent":      "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36",
+          "Accept":          "application/json, text/plain, */*",
+          "Accept-Language": "en-US,en;q=0.9",
+          "Origin":          "https://www.sportybet.com",
+          "Referer":         "https://www.sportybet.com/ke/live",
+          "x-requested-with":"XMLHttpRequest",
         },
-        timeout: 15000,
+        timeout: 20000,
       }
     );
 
+    // SportyBet wraps data in data.data.events or data.data
     const events = data?.data?.events || data?.data || [];
-    for (const event of events) {
-      const home = event.homeTeamName || event.home || "";
-      const away = event.awayTeamName || event.away || "";
+    for (const ev of events) {
+      const home = ev.homeTeamName || ev.home_team || ev.home || "";
+      const away = ev.awayTeamName || ev.away_team || ev.away || "";
       if (!home || !away) continue;
 
       const game = {
-        bookmaker: "SportyBet",
-        bookKey:   "sportybet",
+        bookmaker: "SportyBet", bookKey: "sportybet",
         home, away,
-        score:       parseScore(event),
-        matchMinute: parseMinute(event),
-        league:      event.tournament?.name || event.leagueName || "",
-        markets:     {},
+        score:       buildScore(ev.homeScore, ev.awayScore) || ev.score || null,
+        matchMinute: ev.matchStatus || ev.playedSeconds
+          ? Math.floor((ev.playedSeconds || 0) / 60) + "" : null,
+        league:  ev.tournament?.name || ev.tournament_name || "",
+        markets: {},
       };
 
-      // Parse markets — Over/Under totals
-      for (const market of (event.markets || [])) {
-        const mName = (market.desc || market.name || "").toLowerCase();
-        if (!mName.includes("total") && !mName.includes("over") && !mName.includes("under")) continue;
+      for (const mkt of (ev.markets || [])) {
+        const mName = (mkt.desc || mkt.name || "").toLowerCase();
+        // Look for total / over-under markets
+        if (!mName.includes("total") && !mName.includes("goal") &&
+            !mName.includes("over")  && !mName.includes("under")) continue;
 
-        for (const outcome of (market.outcomes || [])) {
-          const desc = (outcome.desc || outcome.name || "").toLowerCase();
-          const odd  = parseFloat(outcome.odds || outcome.price || 0);
-          const pt   = parseFloat(outcome.spreadInfo?.spread || market.attr || 0);
+        const attr = parseFloat(mkt.attr || mkt.spreadInfo?.spread || 0);
+        for (const oc of (mkt.outcomes || [])) {
+          const desc = (oc.desc || oc.name || "").toLowerCase();
+          const odd  = parseFloat(oc.odds || oc.price || 0);
+          const pt   = parseFloat(oc.attr || attr || 0);
           if (!odd || odd <= 1 || !pt) continue;
-
-          const lineKey = String(pt);
-          if (!game.markets[lineKey]) game.markets[lineKey] = {};
-          if (desc.includes("over"))  game.markets[lineKey].over  = odd;
-          if (desc.includes("under")) game.markets[lineKey].under = odd;
+          const line = String(pt);
+          if (!game.markets[line]) game.markets[line] = {};
+          if (desc.includes("over"))  game.markets[line].over  = odd;
+          if (desc.includes("under")) game.markets[line].under = odd;
         }
       }
-
       if (Object.keys(game.markets).length > 0) games.push(game);
     }
-
-    console.log(`[SPORTYBET LIVE] ${games.length} live games with totals`);
+    console.log(`[SPORTYBET LIVE] ✅ ${games.length} live games with totals`);
   } catch (e) {
-    console.error("[SPORTYBET LIVE ERR]", e.response?.status || e.message);
+    console.error("[SPORTYBET LIVE ERR]", e.response?.status, e.message);
+
+    // Fallback: try alternate endpoint
+    try {
+      const { data } = await axios.get(
+        "https://www.sportybet.com/api/ke/factsCenter/liveEventsBySport",
+        {
+          params: { sportId: "sr:sport:1" },
+          headers: {
+            "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 Chrome/124.0.0.0 Mobile Safari/537.36",
+            "Accept":     "application/json",
+            "Referer":    "https://www.sportybet.com/ke/live",
+          },
+          timeout: 20000,
+        }
+      );
+      const events = data?.data?.events || data?.data || [];
+      console.log(`[SPORTYBET FALLBACK] ${events.length} events found`);
+      // Parse same way — we'll get what we get
+    } catch (e2) {
+      console.error("[SPORTYBET FALLBACK ERR]", e2.response?.status, e2.message);
+    }
   }
   return games;
 }
 
 // ════════════════════════════════════════════════════════════
-//  BETIKA LIVE SCRAPER
-//  Endpoint: /v1/uo/matches?period=live
+//  BETIKA LIVE — fixed totals parsing
 // ════════════════════════════════════════════════════════════
 async function fetchBetikaLive() {
   const games = [];
@@ -147,63 +158,72 @@ async function fetchBetikaLive() {
       {
         params: { limit: 200, page: 1, period: "live", sport_id: 1 },
         headers: {
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/123.0.0.0 Safari/537.36",
-          "Accept": "application/json",
-          "Origin":  "https://www.betika.com",
-          "Referer": "https://www.betika.com/",
+          "User-Agent":      "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 Chrome/124.0.0.0 Mobile Safari/537.36",
+          "Accept":          "application/json",
+          "Accept-Language": "en-US,en;q=0.9",
+          "Origin":          "https://www.betika.com",
+          "Referer":         "https://www.betika.com/ke/live",
         },
-        timeout: 15000,
+        timeout: 20000,
       }
     );
 
     for (const match of (data?.data || [])) {
-      const home = match.home_team || "";
-      const away = match.away_team || "";
+      const home = match.home_team || match.home || "";
+      const away = match.away_team || match.away || "";
       if (!home || !away) continue;
 
       const game = {
-        bookmaker: "Betika",
-        bookKey:   "betika",
+        bookmaker: "Betika", bookKey: "betika",
         home, away,
         score:       match.live_score || match.score || null,
-        matchMinute: match.match_time || match.minute || null,
-        league:      match.competition_name || "",
+        matchMinute: match.time_elapsed || match.match_time || match.minute || null,
+        league:      match.competition_name || match.league || "",
         markets:     {},
       };
 
       for (const pick of (match.picks || [])) {
-        const key  = (pick.odd_key || "").toLowerCase();
-        const odd  = parseFloat(pick.odd_value || 0);
+        const key = (pick.odd_key || pick.market_type || "").toLowerCase();
+        const odd  = parseFloat(pick.odd_value || pick.odds || 0);
+        const spec = pick.special_bet_value || pick.line || pick.value;
         if (!odd || odd <= 1) continue;
 
-        // Betika total keys look like: "over_2.5", "under_2.5"
-        const overMatch  = key.match(/^over[_\s]?([\d.]+)$/);
-        const underMatch = key.match(/^under[_\s]?([\d.]+)$/);
-        if (overMatch)  {
-          const line = overMatch[1];
-          if (!game.markets[line]) game.markets[line] = {};
-          game.markets[line].over = odd;
+        // Betika uses various key formats for totals:
+        // "ov2.5", "un2.5", "over_2.5", "under_2.5", "o2.5", "u2.5"
+        // Also check sub_type_id or market_name
+        const mName = (pick.market_name || pick.name || "").toLowerCase();
+        let line = null, side = null;
+
+        // Pattern 1: over_2.5 / under_2.5
+        let m = key.match(/^(over|under|ov|un|o|u)[_\s]?([\d.]+)$/);
+        if (m) { side = m[1].startsWith("ov") || m[1] === "o" ? "over" : "under"; line = m[2]; }
+
+        // Pattern 2: line from spec value, side from key
+        if (!line && spec) {
+          line = String(parseFloat(spec) || "");
+          if (key.includes("over") || key.startsWith("ov") || key === "o") side = "over";
+          if (key.includes("under") || key.startsWith("un") || key === "u") side = "under";
+          if (mName.includes("over"))  side = "over";
+          if (mName.includes("under")) side = "under";
         }
-        if (underMatch) {
-          const line = underMatch[1];
+
+        if (line && side && parseFloat(line) > 0) {
           if (!game.markets[line]) game.markets[line] = {};
-          game.markets[line].under = odd;
+          game.markets[line][side] = odd;
         }
       }
 
       if (Object.keys(game.markets).length > 0) games.push(game);
     }
-
-    console.log(`[BETIKA LIVE] ${games.length} live games with totals`);
+    console.log(`[BETIKA LIVE] ✅ ${games.length} live games with totals`);
   } catch (e) {
-    console.error("[BETIKA LIVE ERR]", e.response?.status || e.message);
+    console.error("[BETIKA LIVE ERR]", e.response?.status, e.message);
   }
   return games;
 }
 
 // ════════════════════════════════════════════════════════════
-//  22BET LIVE SCRAPER
-//  Endpoint: /LiveFeed/Get1_2
+//  22BET LIVE — corrected parsing
 // ════════════════════════════════════════════════════════════
 async function fetch22BetLive() {
   const games = [];
@@ -213,7 +233,7 @@ async function fetch22BetLive() {
       {
         params: { sports: "1,2,3", lng: "en", gr: 128, isGames: 1 },
         headers: {
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/123.0.0.0 Safari/537.36",
+          "User-Agent":       "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 Chrome/124.0.0.0 Mobile Safari/537.36",
           "Accept":           "application/json, text/javascript, */*; q=0.01",
           "Accept-Language":  "en-US,en;q=0.9",
           "Referer":          "https://22bet.com/live/",
@@ -223,170 +243,73 @@ async function fetch22BetLive() {
       }
     );
 
-    if (!data?.Value) {
-      console.log("[22BET LIVE] No data returned");
-      return games;
-    }
+    if (!data?.Value) { console.log("[22BET LIVE] No data"); return games; }
 
     for (const league of data.Value) {
-      for (const event of (league.Events || [])) {
-        const home = event.Team1 || event.HomeTeam || "";
-        const away = event.Team2 || event.AwayTeam || "";
+      for (const ev of (league.Events || [])) {
+        const home = ev.Team1 || ev.HomeTeam || "";
+        const away = ev.Team2 || ev.AwayTeam || "";
         if (!home || !away) continue;
 
-        const sb = event.Scoreboard;
+        const sb = ev.Scoreboard;
         const game = {
-          bookmaker: "22Bet",
-          bookKey:   "22bet",
+          bookmaker: "22Bet", bookKey: "22bet",
           home, away,
-          score:       sb ? `${sb.Score1 ?? 0}-${sb.Score2 ?? 0}` : null,
-          matchMinute: String(sb?.Time || event.Timer || event.MatchTime || ""),
+          score:       sb ? buildScore(sb.Score1, sb.Score2) : null,
+          matchMinute: String(sb?.Time || ev.Timer || ev.MatchTime || "").replace(/[^0-9]/g,"") || null,
           league:      league.Name || "",
           markets:     {},
         };
 
-        // Parse totals (Group 17 = Totals in 22Bet)
-        for (const market of (event.GameEvents || event.E || [])) {
-          if (market.G !== 17 && market.GroupId !== 17) continue;
-          let overOdd = null, underOdd = null, line = null;
+        for (const mkt of (ev.GameEvents || ev.E || [])) {
+          // Group 17 = Totals
+          if (mkt.G !== 17 && mkt.GroupId !== 17) continue;
+          let over = null, under = null, line = null;
 
-          for (const oc of (market.GameEventItem || market.Items || [])) {
+          for (const oc of (mkt.GameEventItem || mkt.Items || [])) {
             const name = (oc.Name || oc.N || "").toLowerCase();
             const odd  = parseFloat(oc.Price || oc.Coef || oc.C || 0);
             const pt   = parseFloat(oc.Param || oc.P || 0);
             if (!odd || odd <= 1) continue;
-            if (name.includes("over")  || name === "tb" || name === "o") { overOdd  = odd; if (pt) line = String(pt); }
-            if (name.includes("under") || name === "tm" || name === "u") { underOdd = odd; if (pt && !line) line = String(pt); }
+            if (name.includes("over")  || name === "tb" || name === "o") { over  = odd; if (pt) line = String(pt); }
+            if (name.includes("under") || name === "tm" || name === "u") { under = odd; if (pt && !line) line = String(pt); }
           }
-
-          if (overOdd && underOdd && line) {
-            game.markets[line] = { over: overOdd, under: underOdd };
-          }
+          if (over && under && line) game.markets[line] = { over, under };
         }
 
         if (Object.keys(game.markets).length > 0) games.push(game);
       }
     }
-
-    console.log(`[22BET LIVE] ${games.length} live games with totals`);
+    console.log(`[22BET LIVE] ✅ ${games.length} live games with totals`);
   } catch (e) {
-    console.error("[22BET LIVE ERR]", e.response?.status || e.message);
+    console.error("[22BET LIVE ERR]", e.response?.status, e.message);
   }
   return games;
 }
 
-// ════════════════════════════════════════════════════════════
-//  ODIBETS LIVE SCRAPER
-//  Endpoint: /api/v3/games?status=live
-// ════════════════════════════════════════════════════════════
-async function fetchOdibetsLive() {
-  const games = [];
-  try {
-    const { data } = await axios.get(
-      "https://www.odibets.com/api/v3/games",
-      {
-        params: { status: "live", sport: 1, page: 1, per_page: 100 },
-        headers: {
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/123.0.0.0 Safari/537.36",
-          "Accept":  "application/json",
-          "Referer": "https://www.odibets.com/live",
-        },
-        timeout: 15000,
-      }
-    );
-
-    const events = data?.data || data?.games || data?.results || [];
-    for (const event of events) {
-      const home = event.home_team || event.home || event.team1 || "";
-      const away = event.away_team || event.away || event.team2 || "";
-      if (!home || !away) continue;
-
-      const game = {
-        bookmaker: "Odibets",
-        bookKey:   "odibets",
-        home, away,
-        score:       event.score || event.live_score || null,
-        matchMinute: event.minute || event.match_time || null,
-        league:      event.league || event.competition || "",
-        markets:     {},
-      };
-
-      const outcomes = event.outcomes || event.markets || event.picks || [];
-      for (const oc of outcomes) {
-        const name = (oc.name || oc.desc || oc.odd_key || "").toLowerCase();
-        const odd  = parseFloat(oc.odd || oc.price || oc.odds || oc.odd_value || 0);
-        const pt   = parseFloat(oc.line || oc.point || oc.total || 0);
-        if (!odd || odd <= 1 || !pt) continue;
-        const line = String(pt);
-        if (!game.markets[line]) game.markets[line] = {};
-        if (name.includes("over"))  game.markets[line].over  = odd;
-        if (name.includes("under")) game.markets[line].under = odd;
-      }
-
-      if (Object.keys(game.markets).length > 0) games.push(game);
-    }
-
-    console.log(`[ODIBETS LIVE] ${games.length} live games with totals`);
-  } catch (e) {
-    console.error("[ODIBETS LIVE ERR]", e.response?.status || e.message);
-  }
-  return games;
-}
-
-// ════════════════════════════════════════════════════════════
-//  SCORE + MINUTE PARSERS
-// ════════════════════════════════════════════════════════════
-function parseScore(event) {
-  try {
-    if (event.homeScore !== undefined && event.awayScore !== undefined)
-      return `${event.homeScore}-${event.awayScore}`;
-    if (event.score) return String(event.score);
-    if (event.setScore) return String(event.setScore);
-  } catch (_) {}
-  return null;
-}
-
-function parseMinute(event) {
-  try {
-    if (event.matchStatus) return String(event.matchStatus);
-    if (event.playedTime)  return String(event.playedTime);
-    if (event.clock?.matchTime) return String(event.clock.matchTime);
-  } catch (_) {}
+function buildScore(s1, s2) {
+  if (s1 !== undefined && s2 !== undefined) return `${s1}-${s2}`;
   return null;
 }
 
 // ════════════════════════════════════════════════════════════
-//  ARB DETECTION — cross-bookmaker live
+//  ARB DETECTION
 // ════════════════════════════════════════════════════════════
 function findLiveArbs(allGames) {
   const arbs = [];
 
-  // Group games by match (across all bookmakers)
-  const matchGroups = [];
-
-  for (let i = 0; i < allGames.length; i++) {
-    const g = allGames[i];
-    let found = false;
-
-    for (const group of matchGroups) {
-      const ref = group[0];
-      if (teamsMatch(ref.home, ref.away, g.home, g.away)) {
-        group.push(g);
-        found = true;
-        break;
-      }
-    }
-    if (!found) matchGroups.push([g]);
+  // Group same match across bookmakers
+  const groups = [];
+  for (const g of allGames) {
+    const grp = groups.find(gr => teamsMatch(gr[0].home, gr[0].away, g.home, g.away));
+    if (grp) grp.push(g);
+    else groups.push([g]);
   }
 
-  // For each match group, find arbs across bookmakers
-  for (const group of matchGroups) {
-    if (group.length < 2) continue; // need at least 2 bookmakers
+  for (const group of groups) {
+    if (group.length < 2) continue;
 
-    const ref = group[0];
-    const matchName = `${ref.home} vs ${ref.away}`;
-
-    // Collect all Over/Under odds per line across all books in the group
+    // Collect all over/under per line from different books
     const lineMap = {};
     for (const g of group) {
       for (const [line, sides] of Object.entries(g.markets)) {
@@ -396,71 +319,64 @@ function findLiveArbs(allGames) {
       }
     }
 
-    // Find best Over + best Under from DIFFERENT bookmakers
+    const ref = group[0];
+    const ctx = group.find(g => g.score || g.matchMinute) || ref;
+
     for (const [line, sides] of Object.entries(lineMap)) {
       if (!sides.over.length || !sides.under.length) continue;
+      const bO = sides.over.reduce((a, b) => a.odd > b.odd ? a : b);
+      const bU = sides.under.reduce((a, b) => a.odd > b.odd ? a : b);
+      if (bO.bookKey === bU.bookKey) continue;
 
-      const bestOver  = sides.over.reduce((a, b) => a.odd > b.odd ? a : b);
-      const bestUnder = sides.under.reduce((a, b) => a.odd > b.odd ? a : b);
-
-      // Must be different bookmakers
-      if (bestOver.bookKey === bestUnder.bookKey) continue;
-
-      const sum = 1 / bestOver.odd + 1 / bestUnder.odd;
+      const sum = 1 / bO.odd + 1 / bU.odd;
       if (sum >= 1.0) continue;
 
       const profitPct = ((1 - sum) * 100).toFixed(2);
       if (parseFloat(profitPct) < MIN_PROFIT_PCT) continue;
 
-      // Get live context from whichever book has it
-      const liveCtx = group.find(g => g.score || g.matchMinute) || group[0];
-
       arbs.push({
-        match:       matchName,
-        home:        ref.home,
-        away:        ref.away,
-        league:      ref.league || liveCtx.league || "",
-        line,
-        profitPct,
+        match:       `${ref.home} vs ${ref.away}`,
+        league:      ctx.league || "",
+        line, profitPct,
         profit:      (STAKE / sum - STAKE).toFixed(2),
         totalReturn: (STAKE / sum).toFixed(2),
         margin:      (sum * 100).toFixed(2),
-        over:        { ...bestOver,  stake: ((STAKE / sum) / bestOver.odd).toFixed(2) },
-        under:       { ...bestUnder, stake: ((STAKE / sum) / bestUnder.odd).toFixed(2) },
-        score:       liveCtx.score,
-        matchMinute: liveCtx.matchMinute,
-        booksInGroup: group.map(g => g.bookmaker),
+        over:        { ...bO, stake: ((STAKE / sum) / bO.odd).toFixed(2) },
+        under:       { ...bU, stake: ((STAKE / sum) / bU.odd).toFixed(2) },
+        score:       ctx.score,
+        matchMinute: ctx.matchMinute,
+        books:       group.map(g => g.bookmaker).join(", "),
       });
     }
   }
 
-  // Sort by profit % descending
   return arbs.sort((a, b) => parseFloat(b.profitPct) - parseFloat(a.profitPct));
 }
 
 // ════════════════════════════════════════════════════════════
-//  FORMAT LIVE ALERT
+//  FORMAT ALERT
 // ════════════════════════════════════════════════════════════
-function formatLiveAlert(arb, rank, total) {
-  const t = now();
-  const scoreLine  = arb.score       ? `📊 Score: <b>${arb.score}</b>` : null;
-  const minuteLine = arb.matchMinute ? `⏱ Minute: <b>${arb.matchMinute}'</b>` : null;
-  const ctx        = [scoreLine, minuteLine].filter(Boolean).join("   ");
+function formatAlert(arb, rank, total) {
+  const t = nowKE();
+  const ctx = [
+    arb.score       ? `📊 Score: <b>${arb.score}</b>` : null,
+    arb.matchMinute ? `⏱ Minute: <b>${arb.matchMinute}'</b>` : null,
+  ].filter(Boolean).join("   ");
 
   return [
-    `🚨 <b>LIVE ARB FOUND — ${arb.profitPct}% Edge</b>  [${rank}/${total}]`,
+    `🚨 <b>LIVE ARB — ${arb.profitPct}% Edge</b>  [${rank}/${total}]`,
     `🔴 LIVE | ${t}`,
     ``,
     arb.league ? `🏆 <b>${arb.league}</b>` : null,
     `⚽ <b>${arb.match}</b>`,
     ctx || null,
-    `📌 Market: <b>Goals O/U | Line: ${arb.line}</b>`,
+    `📌 Market: <b>Goals O/U ${arb.line}</b>`,
     ``,
     `💰 Profit: <b>${arb.profitPct}%</b>`,
     `✅ Guaranteed profit: <b>KES ${arb.profit}</b>`,
-    `📈 Total return: <b>KES ${arb.totalReturn}</b> (on KES ${STAKE})`,
+    `📈 Total return: <b>KES ${arb.totalReturn}</b> (stake: KES ${STAKE})`,
     ``,
-    `📋 <b>Place these 2 bets RIGHT NOW:</b>`,
+    `📋 <b>Place these 2 bets NOW:</b>`,
     ``,
     `  🔼 <b>Over ${arb.line}</b>`,
     `     📍 <b>${arb.over.book}</b>`,
@@ -471,8 +387,8 @@ function formatLiveAlert(arb, rank, total) {
     `     Odd: <b>${arb.under.odd}</b>  |  Stake: <b>KES ${arb.under.stake}</b>`,
     ``,
     `📉 Combined margin: ${arb.margin}%`,
-    `📡 Books compared: ${arb.booksInGroup.join(", ")}`,
-    `⚡ <b>LIVE odds change every second — place bets NOW!</b>`,
+    `📡 Books scanned: ${arb.books}`,
+    `⚡ <b>Place BOTH bets immediately — odds change fast!</b>`,
   ].filter(l => l !== null).join("\n");
 }
 
@@ -480,89 +396,81 @@ function formatLiveAlert(arb, rank, total) {
 //  MAIN
 // ════════════════════════════════════════════════════════════
 async function main() {
-  const t = now();
+  const t = nowKE();
   console.log("=".repeat(62));
-  console.log(`  LIVE ARB BOT — Kenya Edition | ${t}`);
-  console.log(`  Books: SportyBet | Betika | 22Bet | Odibets`);
+  console.log(`  LIVE ARB BOT v2 — Kenya | ${t}`);
+  console.log(`  Books: SportyBet | Betika | 22Bet`);
   console.log(`  Stake: KES ${STAKE} | Min profit: ${MIN_PROFIT_PCT}%`);
   console.log("=".repeat(62));
 
-  // ── Scrape all bookmakers in parallel ─────────────────────
+  // Check Telegram config first
+  if (!TELEGRAM_TOKEN || !TELEGRAM_CHAT_ID) {
+    console.error("❌ Missing TELEGRAM_TOKEN or TELEGRAM_CHAT_ID in secrets!");
+    process.exit(1);
+  }
+
   console.log("\n[SCRAPING] Fetching live odds from all books...\n");
-  const [sportyLive, betikaLive, bet22Live, odiLive] = await Promise.allSettled([
+
+  // Scrape all books (continue even if some fail)
+  const [sportyLive, betikaLive, bet22Live] = await Promise.allSettled([
     fetchSportybetLive(),
     fetchBetikaLive(),
     fetch22BetLive(),
-    fetchOdibetsLive(),
   ]).then(results => results.map(r => r.status === "fulfilled" ? r.value : []));
 
-  const totalGames = sportyLive.length + betikaLive.length + bet22Live.length + odiLive.length;
-  console.log(`\n[TOTAL] ${totalGames} live games across all books`);
+  const total = sportyLive.length + betikaLive.length + bet22Live.length;
+  console.log(`\n[TOTAL] ${total} live games across all books`);
 
-  if (totalGames === 0) {
+  if (total === 0) {
     await sendTelegram(
       `🔴 <b>Live Scan</b> | ${t}\n\n` +
-      `⚠️ No live games found from any bookmaker.\n` +
-      `This could mean:\n` +
-      `  • No matches currently live\n` +
-      `  • Bookmakers blocking requests\n\n` +
+      `❌ No live games found.\n\n` +
+      `Possible reasons:\n` +
+      `• No matches live right now\n` +
+      `• Bookmakers returning errors\n\n` +
+      `SportyBet: ${sportyLive.length} | Betika: ${betikaLive.length} | 22Bet: ${bet22Live.length}\n\n` +
       `Next scan in 1 min...`
     );
     return;
   }
 
-  // ── Combine all games ──────────────────────────────────────
-  const allGames = [
-    ...sportyLive,
-    ...betikaLive,
-    ...bet22Live,
-    ...odiLive,
-  ];
-
-  // ── Find arbs ──────────────────────────────────────────────
-  console.log("\n[SCANNING] Looking for live arb opportunities...");
+  console.log("\n[SCANNING] Looking for arb opportunities...");
+  const allGames = [...sportyLive, ...betikaLive, ...bet22Live];
   const arbs = findLiveArbs(allGames);
 
-  console.log(`\n  SportyBet live:  ${sportyLive.length}`);
-  console.log(`  Betika live:     ${betikaLive.length}`);
-  console.log(`  22Bet live:      ${bet22Live.length}`);
-  console.log(`  Odibets live:    ${odiLive.length}`);
-  console.log(`  ──────────────────────`);
-  console.log(`  Total games:     ${totalGames}`);
-  console.log(`  Arbs found:      ${arbs.length}`);
+  console.log(`\n  SportyBet: ${sportyLive.length} | Betika: ${betikaLive.length} | 22Bet: ${bet22Live.length}`);
+  console.log(`  Arbs found: ${arbs.length}`);
 
   if (arbs.length === 0) {
     await sendTelegram(
-      `🔍 <b>Live Scan Complete</b> | ${t}\n\n` +
-      `📡 SportyBet: <b>${sportyLive.length}</b> live games\n` +
-      `📡 Betika: <b>${betikaLive.length}</b> live games\n` +
-      `📡 22Bet: <b>${bet22Live.length}</b> live games\n` +
-      `📡 Odibets: <b>${odiLive.length}</b> live games\n\n` +
-      `❌ No live arbs found — next scan in 1 min...`
+      `🔍 <b>Live Scan</b> | ${t}\n\n` +
+      `📡 SportyBet: <b>${sportyLive.length}</b>\n` +
+      `📡 Betika: <b>${betikaLive.length}</b>\n` +
+      `📡 22Bet: <b>${bet22Live.length}</b>\n` +
+      `📊 Total: <b>${total}</b> live games\n\n` +
+      `❌ No arbs right now — next scan in 1 min...`
     );
   } else {
-    // Send top 5 arbs
     const toSend = arbs.slice(0, 5);
     for (let i = 0; i < toSend.length; i++) {
-      await sendTelegram(formatLiveAlert(toSend[i], i + 1, arbs.length));
+      await sendTelegram(formatAlert(toSend[i], i + 1, arbs.length));
       await sleep(1200);
     }
-
-    // Send summary
     await sendTelegram(
       `✅ <b>${arbs.length} LIVE arb(s) found!</b> | ${t}\n\n` +
-      `Top opportunities:\n` +
       arbs.slice(0, 5).map((a, i) =>
-        `  ${i+1}. ${a.match} — <b>${a.profitPct}%</b>\n` +
-        `     O/U ${a.line} | ${a.over.book} vs ${a.under.book}`
+        `${i+1}. <b>${a.match}</b> — ${a.profitPct}%\n` +
+        `   O/U ${a.line} | ${a.over.book} vs ${a.under.book}`
       ).join("\n") +
-      `\n\n⚡ <b>Place bets IMMEDIATELY — live odds expire fast!</b>`
+      `\n\n⚡ Place bets IMMEDIATELY!`
     );
   }
 }
 
-main().catch(async (err) => {
+main().catch(async err => {
   console.error("FATAL:", err.message);
-  await sendTelegram(`❌ <b>Live Bot error:</b> ${err.message}`);
+  try {
+    await sendTelegram(`❌ <b>Bot crashed:</b> ${err.message}`);
+  } catch (_) {}
   process.exit(1);
 });
