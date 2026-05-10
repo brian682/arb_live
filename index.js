@@ -5,16 +5,7 @@
  * ║  Uses The Odds API (free tier) for reliable live data    ║
  * ║  Books: 1xBet, Betway, Marathonbet, Unibet, Betsson      ║
  * ║  + 22Bet scraped directly                                ║
- * ║                                                          ║
- * ║  WHY THE ODDS API:                                       ║
- * ║  SportyBet/Betika block GitHub IPs (all return 404)      ║
- * ║  The Odds API is reliable, fast, and free for 500 req/mo ║
  * ╚══════════════════════════════════════════════════════════╝
- *
- * SECRETS NEEDED (GitHub → Settings → Secrets):
- *   TELEGRAM_TOKEN    — from @BotFather
- *   TELEGRAM_CHAT_ID  — your personal chat ID (NOT the bot ID)
- *   ODDS_API_KEY      — free at https://the-odds-api.com
  */
 
 const axios = require("axios");
@@ -25,8 +16,6 @@ const ODDS_API_KEY     = process.env.ODDS_API_KEY;
 const MIN_PROFIT_PCT   = parseFloat(process.env.MIN_PROFIT_PCT || "0");
 const STAKE            = parseFloat(process.env.STAKE || "1000");
 
-// ─── BOOKMAKERS ──────────────────────────────────────────────
-// These are all available on Odds API free tier
 const BOOKS = {
   "onexbet":     "1xBet 🇰🇪",
   "betway":      "Betway 🇰🇪",
@@ -37,7 +26,6 @@ const BOOKS = {
 };
 const BOOK_KEYS = Object.keys(BOOKS).join(",");
 
-// Top live sports to scan — football first, then basketball
 const LIVE_SPORTS = [
   "soccer_epl",
   "soccer_uefa_champs_league",
@@ -51,15 +39,10 @@ const LIVE_SPORTS = [
   "soccer_turkey_super_league",
   "soccer_brazil_campeonato",
   "soccer_argentina_primera_division",
-  "soccer_africa_africa_cup_of_nations",
-  "soccer_kenya_premier_league",
   "basketball_nba",
   "basketball_euroleague",
-  "tennis_atp_french_open",
-  "tennis_wta_french_open",
 ];
 
-// ─── HELPERS ─────────────────────────────────────────────────
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 function nowKE() {
@@ -82,9 +65,6 @@ function teamsMatch(h1, a1, h2, a2) {
   return Math.max(ov(nh1, nh2) + ov(na1, na2), ov(nh1, na2) + ov(na1, nh2)) >= 2;
 }
 
-// ════════════════════════════════════════════════════════════
-//  TELEGRAM
-// ════════════════════════════════════════════════════════════
 async function sendTelegram(msg) {
   try {
     const res = await axios.post(
@@ -99,12 +79,9 @@ async function sendTelegram(msg) {
   }
 }
 
-// ════════════════════════════════════════════════════════════
-//  THE ODDS API — LIVE GAMES
-//  Fetches in-play odds for a given sport
-// ════════════════════════════════════════════════════════════
 async function fetchLiveOdds(sport) {
   try {
+    const now = Date.now();
     const { data, headers } = await axios.get(
       `https://api.the-odds-api.com/v4/sports/${sport}/odds/`,
       {
@@ -114,40 +91,29 @@ async function fetchLiveOdds(sport) {
           markets:    "totals",
           oddsFormat: "decimal",
           bookmakers: BOOK_KEYS,
-          // Live games filter — only returns in-play events
-          commenceTimeTo: new Date(Date.now() - 60000).toISOString(), // started before now
+          commenceTimeTo: new Date(now - 60000).toISOString(),
         },
         timeout: 20000,
       }
     );
-
     const remaining = headers["x-requests-remaining"] || "?";
-    // Filter to only currently live (started but presumably ongoing)
-    const now = Date.now();
     const liveGames = data.filter(g => {
       const start = new Date(g.commence_time).getTime();
       const hoursAgo = (now - start) / (1000 * 60 * 60);
-      // Football: typically 0–2.5hrs, basketball: 0–3hrs
       return start <= now && hoursAgo < 3;
     });
-
     if (liveGames.length > 0) {
       console.log(`[${sport}] ${liveGames.length} live games | API left: ${remaining}`);
     }
     return liveGames.map(g => ({ ...g, isLive: true, sport_key: sport }));
   } catch (e) {
-    // 422 = no games for this sport right now (normal)
     if (e.response?.status === 422) return [];
-    // 401 = live not on free plan for this sport
     if (e.response?.status === 401) return [];
     console.error(`[ODDS API ERR] ${sport}: ${e.response?.data?.message || e.message}`);
     return [];
   }
 }
 
-// ════════════════════════════════════════════════════════════
-//  22BET LIVE SCRAPER (direct — still works)
-// ════════════════════════════════════════════════════════════
 async function fetch22BetLive() {
   const games = [];
   try {
@@ -175,12 +141,11 @@ async function fetch22BetLive() {
         if (!home || !away) continue;
 
         const sb = ev.Scoreboard;
-        const minute = String(sb?.Time || ev.Timer || ev.MatchTime || "").replace(/\D/g, "") || null;
         const game = {
           bookmaker: "22Bet", bookKey: "22bet",
           home_team: home, away_team: away,
           score:       sb ? `${sb.Score1 ?? 0}-${sb.Score2 ?? 0}` : null,
-          matchMinute: minute,
+          matchMinute: String(sb?.Time || ev.Timer || ev.MatchTime || "").replace(/\D/g, "") || null,
           league:      league.Name || "",
           markets:     {},
         };
@@ -209,15 +174,11 @@ async function fetch22BetLive() {
   return games;
 }
 
-// ════════════════════════════════════════════════════════════
-//  ARB DETECTION — Odds API books vs each other
-// ════════════════════════════════════════════════════════════
 function findAPIArbs(games) {
   const arbs = [];
   for (const game of games) {
     const books = (game.bookmakers || []).filter(b => BOOKS[b.key]);
     if (books.length < 2) continue;
-
     const lines = {};
     for (const bk of books) {
       const name = BOOKS[bk.key];
@@ -233,34 +194,26 @@ function findAPIArbs(games) {
         }
       }
     }
-
     for (const [line, sides] of Object.entries(lines)) {
       if (!sides.over.length || !sides.under.length) continue;
       const bO = sides.over.reduce((a, b)  => a.odd > b.odd ? a : b);
       const bU = sides.under.reduce((a, b) => a.odd > b.odd ? a : b);
       if (bO.bookKey === bU.bookKey) continue;
-
       const sum = 1 / bO.odd + 1 / bU.odd;
       if (sum >= 1.0) continue;
       const profitPct = ((1 - sum) * 100).toFixed(2);
       if (parseFloat(profitPct) < MIN_PROFIT_PCT) continue;
-
       arbs.push(buildArb({ game, line, over: bO, under: bU, sum, profitPct }));
     }
   }
   return arbs;
 }
 
-// ════════════════════════════════════════════════════════════
-//  ARB DETECTION — 22Bet vs Odds API books
-// ════════════════════════════════════════════════════════════
 function find22BetArbs(apiGames, bet22Games) {
   const arbs = [];
   for (const ag of apiGames) {
     const m22 = bet22Games.find(g => teamsMatch(ag.home_team, ag.away_team, g.home_team, g.away_team));
     if (!m22) continue;
-
-    // Build line map from Odds API
     const apiLines = {};
     for (const bk of (ag.bookmakers || [])) {
       const name = BOOKS[bk.key];
@@ -277,23 +230,16 @@ function find22BetArbs(apiGames, bet22Games) {
         }
       }
     }
-
-    // Compare each 22Bet line against Odds API lines
     for (const [line, sides22] of Object.entries(m22.markets)) {
       const al = apiLines[line];
       if (!al) continue;
-
-      // 22Bet OVER vs API UNDER
       if (al.under.length && sides22.over) {
         const best = al.under.reduce((a, b) => a.odd > b.odd ? a : b);
-        const over = { book: "22Bet 🇰🇪", bookKey: "22bet", odd: sides22.over };
-        tryPushArb({ game: ag, m22, line, over, under: best, arbs });
+        tryPushArb({ game: ag, m22, line, over: { book: "22Bet 🇰🇪", bookKey: "22bet", odd: sides22.over }, under: best, arbs });
       }
-      // API OVER vs 22Bet UNDER
       if (al.over.length && sides22.under) {
         const best = al.over.reduce((a, b) => a.odd > b.odd ? a : b);
-        const under = { book: "22Bet 🇰🇪", bookKey: "22bet", odd: sides22.under };
-        tryPushArb({ game: ag, m22, line, over: best, under, arbs });
+        tryPushArb({ game: ag, m22, line, over: best, under: { book: "22Bet 🇰🇪", bookKey: "22bet", odd: sides22.under }, arbs });
       }
     }
   }
@@ -305,7 +251,6 @@ function tryPushArb({ game, m22, line, over, under, arbs }) {
   if (sum >= 1.0) return;
   const profitPct = ((1 - sum) * 100).toFixed(2);
   if (parseFloat(profitPct) < MIN_PROFIT_PCT) return;
-  // Merge live context from 22Bet
   const merged = { ...game, score: m22.score, matchMinute: m22.matchMinute, league: game.league || m22.league };
   arbs.push(buildArb({ game: merged, line, over, under, sum, profitPct }));
 }
@@ -325,9 +270,6 @@ function buildArb({ game, line, over, under, sum, profitPct }) {
   };
 }
 
-// ════════════════════════════════════════════════════════════
-//  FORMAT ALERT
-// ════════════════════════════════════════════════════════════
 function formatAlert(arb, rank, total) {
   const t = nowKE();
   const ctx = [
@@ -363,9 +305,6 @@ function formatAlert(arb, rank, total) {
   ].filter(l => l !== null).join("\n");
 }
 
-// ════════════════════════════════════════════════════════════
-//  MAIN
-// ════════════════════════════════════════════════════════════
 async function main() {
   const t = nowKE();
   console.log("=".repeat(62));
@@ -375,49 +314,34 @@ async function main() {
   console.log("=".repeat(62));
 
   if (!ODDS_API_KEY) {
-    await sendTelegram(
-      "❌ <b>Missing ODDS_API_KEY secret!</b>\n\n" +
-      "Get a free key at: https://the-odds-api.com\n" +
-      "Then add it to GitHub → Settings → Secrets → ODDS_API_KEY"
-    );
+    await sendTelegram("❌ <b>Missing ODDS_API_KEY secret!</b>\n\nGet free key: https://the-odds-api.com\nAdd to GitHub → Settings → Secrets → ODDS_API_KEY");
     return;
   }
 
-  // ── 1. Fetch 22Bet live (direct scrape) ───────────────────
   console.log("\n[STEP 1] Scraping 22Bet live...");
   const bet22Live = await fetch22BetLive();
 
-  // ── 2. Fetch live odds from Odds API ──────────────────────
   console.log("\n[STEP 2] Fetching live odds via Odds API...");
   let apiGames = [];
-  let requestsUsed = 0;
-
   for (const sport of LIVE_SPORTS) {
-    const games = await fetchLiveOdds(sport);
-    apiGames = apiGames.concat(games);
-    requestsUsed++;
+    apiGames = apiGames.concat(await fetchLiveOdds(sport));
     await sleep(200);
-    // Stop at 15 requests to conserve free tier quota
-    if (requestsUsed >= 15) break;
   }
 
   const apiLiveCount = apiGames.filter(g => g.bookmakers?.length > 0).length;
   console.log(`\n[ODDS API] ${apiLiveCount} live games with odds`);
   console.log(`[22BET]    ${bet22Live.length} live games`);
 
-  // ── 3. Find arbs ──────────────────────────────────────────
   console.log("\n[STEP 3] Scanning for arbs...");
-  const apiArbs    = findAPIArbs(apiGames);
+  const apiArbs     = findAPIArbs(apiGames);
   const cross22Arbs = find22BetArbs(apiGames, bet22Live);
-
-  const allArbs = [...apiArbs, ...cross22Arbs]
+  const allArbs     = [...apiArbs, ...cross22Arbs]
     .sort((a, b) => parseFloat(b.profitPct) - parseFloat(a.profitPct));
 
-  console.log(`\n  Odds API arbs:  ${apiArbs.length}`);
-  console.log(`  22Bet cross:    ${cross22Arbs.length}`);
-  console.log(`  TOTAL:          ${allArbs.length}`);
+  console.log(`\n  Odds API arbs: ${apiArbs.length}`);
+  console.log(`  22Bet cross:   ${cross22Arbs.length}`);
+  console.log(`  TOTAL:         ${allArbs.length}`);
 
-  // ── 4. Send alerts ────────────────────────────────────────
   if (allArbs.length === 0) {
     await sendTelegram(
       `🔴 <b>Live Scan</b> | ${t}\n\n` +
@@ -438,7 +362,7 @@ async function main() {
         `${i+1}. <b>${a.match}</b> — <b>${a.profitPct}%</b>\n` +
         `   O/U ${a.line} | ${a.over.book} vs ${a.under.book}`
       ).join("\n") +
-      `\n\n⚡ Place bets IMMEDIATELY — live odds expire in seconds!`
+      `\n\n⚡ Place bets IMMEDIATELY!`
     );
   }
 }
